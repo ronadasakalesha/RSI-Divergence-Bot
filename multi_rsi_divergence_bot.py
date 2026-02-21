@@ -239,11 +239,19 @@ def compute_divergences(df: pd.DataFrame, lookback: int = 7) -> pd.DataFrame:
         if i >= 2:
             mc1, mc2, rsi1, maxr = max_close_arr[i-1], max_close_arr[i-2], df["rsi"].iloc[i-1], max_rsi_arr[i]
             if not any(math.isnan(v) for v in [mc1, mc2, rsi1, maxr]):
-                if mc1 > mc2 and rsi1 < maxr and rsi_val <= rsi1: divbear[i] = True
+                # Bearish Divergence: Price higher high, but RSI lower high
+                # "Strong" condition: either current point or previous point > 65
+                if mc1 > mc2 and rsi1 < maxr and rsi_val <= rsi1:
+                    if rsi1 > 65 or maxr > 65:
+                        divbear[i] = True
             
             minc1, minc2, mr1 = min_close_arr[i-1], min_close_arr[i-2], min_rsi_arr[i]
             if not any(math.isnan(v) for v in [minc1, minc2, mr1]):
-                if minc1 < minc2 and rsi1 > mr1 and rsi_val >= rsi1: divbull[i] = True
+                # Bullish Divergence: Price lower low, but RSI higher low
+                # "Strong" condition: either current point or previous point < 38
+                if minc1 < minc2 and rsi1 > mr1 and rsi_val >= rsi1:
+                    if rsi1 < 38 or mr1 < 38:
+                        divbull[i] = True
 
     df["divbear_close"], df["divbull_close"] = divbear, divbull
     return df
@@ -278,20 +286,25 @@ def build_alert(tcfg: dict, sig_type: str, row: pd.Series) -> str:
     symbol, px, rsi, lb = tcfg["symbol"], row["close"], row["rsi"], tcfg["label"]
     tf_display = tcfg.get("display_tf", tcfg["interval"])
     
-    icons = {"divbear": "🔴 Bearish Div", "divbull": "🟢 Bullish Div", "buy": "✅ BUY CONFIRMED ▲", "sell": "🔻 SELL CONFIRMED ▼"}
+    icons = {
+        "divbear": "🔴 <b>Strong Bearish Divergence Detected</b>",
+        "divbull": "🟢 <b>Strong Bullish Divergence Detected</b>",
+        "buy":     "✅ <b>BUY CONFIRMED ▲</b>",
+        "sell":    "🔻 <b>SELL CONFIRMED ▼</b>"
+    }
     notes = {
-        "divbear": "⚠️ Watch for break below low",
-        "divbull": "⚠️ Watch for break above high",
-        "buy": "Candle broke above high with RSI > 40",
-        "sell": "Candle broke below low with RSI < 60"
+        "divbear": "⚠️ RSI > 65. Watch for break below low.",
+        "divbull": "⚠️ RSI < 38. Watch for break above high.",
+        "buy":     f"Price broke above high with RSI > {RSI_BUY_MIN}",
+        "sell":    f"Price broke below low with RSI < {RSI_SELL_MAX}"
     }
     
     return (
-        f"<b>{icons.get(sig_type)}</b>\n"
-        f"Symbol : {symbol}  |  TF : {tf_display}\n"
+        f"{icons.get(sig_type)}\n"
+        f"<b>TF: {tf_display}</b>  |  Symbol: {symbol}\n"
         f"Time   : {ts_str}\n"
         f"Close  : {lb}{px:.2f}  |  RSI : {rsi:.2f}\n"
-        f"{notes.get(sig_type)}"
+        f"<i>{notes.get(sig_type)}</i>"
     )
 
 # ─────────────────────────────────────────────────────────────────────
