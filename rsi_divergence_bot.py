@@ -420,11 +420,7 @@ def main():
     log.info(f"Syncing to next candle close in {wait:.0f}s  (at {next_close})")
     time.sleep(wait)
 
-    send_telegram(
-        f"🤖 <b>RSI Divergence Bot Started</b>\n"
-        f"Symbol: {SYMBOL}  |  TF: {RESOLUTION}\n"
-        f"Synced to candle boundary — watching for divergences…"
-    )
+
 
     while True:
         try:
