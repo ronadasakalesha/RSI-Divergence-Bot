@@ -57,23 +57,22 @@ RSI_SELL_MAX  = 60
 CANDLES_FETCH = 100
 DRY_RUN       = False
 
-# ── Target Symbols ─────────────────────────────────────────────────────
+# ── Target Symbols (Expandable) ──────────────────────────────────────────
+# We now define each Symbol + Timeframe combination as a target.
 TARGETS = [
-    {
-        "symbol": "BTCUSD",
-        "exchange": "Delta",
-        "interval": "5m",
-        "gated": False,     # 24/7 crypto
-        "label": "$",
-    },
-    {
-        "symbol": "Nifty50",
-        "exchange": "AngelOne",
-        "interval": "FIVE_MINUTE",
-        "token": "99926000",
-        "gated": True,      # 09:15-15:30 IST
-        "label": "₹",
-    }
+    # --- BTCUSD (Delta Exchange) ---
+    {"symbol": "BTCUSD", "exchange": "Delta", "interval": "5m",    "gated": False, "label": "$"},
+    {"symbol": "BTCUSD", "exchange": "Delta", "interval": "15m",   "gated": False, "label": "$"},
+    {"symbol": "BTCUSD", "exchange": "Delta", "interval": "30m",   "gated": False, "label": "$"},
+    {"symbol": "BTCUSD", "exchange": "Delta", "interval": "1h",    "gated": False, "label": "$"},
+    {"symbol": "BTCUSD", "exchange": "Delta", "interval": "4h",    "gated": False, "label": "$"},
+
+    # --- Nifty50 (Angel One) ---
+    # Note: Angel One does NOT support native 4h for Index candles.
+    {"symbol": "Nifty50", "exchange": "AngelOne", "interval": "FIVE_MINUTE",    "token": "99926000", "gated": True, "label": "₹", "display_tf": "5m"},
+    {"symbol": "Nifty50", "exchange": "AngelOne", "interval": "FIFTEEN_MINUTE", "token": "99926000", "gated": True, "label": "₹", "display_tf": "15m"},
+    {"symbol": "Nifty50", "exchange": "AngelOne", "interval": "THIRTY_MINUTE",  "token": "99926000", "gated": True, "label": "₹", "display_tf": "30m"},
+    {"symbol": "Nifty50", "exchange": "AngelOne", "interval": "ONE_HOUR",       "token": "99926000", "gated": True, "label": "₹", "display_tf": "1h"},
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -119,7 +118,10 @@ def send_telegram(message: str) -> None:
 
 def fetch_delta_candles(symbol: str, resolution: str, count: int) -> pd.DataFrame:
     """Fetch candles from Delta Exchange India."""
-    res_secs = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+    res_secs = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "1d": 86400
+    }
     secs = res_secs.get(resolution, 300)
     now = int(time.time())
     start = now - secs * (count + 10)
@@ -145,13 +147,19 @@ def fetch_delta_candles(symbol: str, resolution: str, count: int) -> pd.DataFram
         if len(df) > 1: df = df.iloc[:-1].copy()
         return df.tail(count).reset_index(drop=True)
     except Exception as exc:
-        log.error(f"Delta fetch error ({symbol}): {exc}")
+        log.error(f"Delta fetch error ({symbol} @ {resolution}): {exc}")
         return pd.DataFrame()
 
 def fetch_angel_candles(smart_api, token: str, interval: str, count: int) -> pd.DataFrame:
     """Fetch candles from Angel One."""
+    res_mins = {
+        "ONE_MINUTE": 1, "FIVE_MINUTE": 5, "FIFTEEN_MINUTE": 15,
+        "THIRTY_MINUTE": 30, "ONE_HOUR": 60, "ONE_DAY": 1440
+    }
+    m = res_mins.get(interval, 5)
+    
     now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    from_ist = now_ist - timedelta(minutes=(count + 30) * 5)
+    from_ist = now_ist - timedelta(minutes=(count + 30) * m)
     
     historic_param = {
         "exchange": "NSE",
@@ -163,7 +171,7 @@ def fetch_angel_candles(smart_api, token: str, interval: str, count: int) -> pd.
     try:
         resp = smart_api.getCandleData(historic_param)
         if not resp.get('status'):
-            log.error(f"AngelOne fetch error: {resp.get('message')}")
+            log.error(f"AngelOne fetch error ({interval}): {resp.get('message')}")
             return pd.DataFrame()
         
         data = resp.get('data', [])
@@ -179,7 +187,7 @@ def fetch_angel_candles(smart_api, token: str, interval: str, count: int) -> pd.
         if len(df) > 1: df = df.iloc[:-1].copy()
         return df.tail(count).reset_index(drop=True)
     except Exception as exc:
-        log.error(f"AngelOne fetch exception: {exc}")
+        log.error(f"AngelOne fetch exception ({interval}): {exc}")
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────────────
@@ -264,10 +272,11 @@ class TriggerTracker:
 # ─────────────────────────────────────────────────────────────────────
 
 def build_alert(tcfg: dict, sig_type: str, row: pd.Series) -> str:
-    # Use IST for all display timestamps to keep Nifty users happy, BTC users don't mind
+    # Use IST for all display timestamps
     ts_ist = datetime.fromtimestamp(row["time"], tz=timezone.utc) + timedelta(hours=5, minutes=30)
     ts_str = ts_ist.strftime("%Y-%m-%d %H:%M IST")
     symbol, px, rsi, lb = tcfg["symbol"], row["close"], row["rsi"], tcfg["label"]
+    tf_display = tcfg.get("display_tf", tcfg["interval"])
     
     icons = {"divbear": "🔴 Bearish Div", "divbull": "🟢 Bullish Div", "buy": "✅ BUY CONFIRMED ▲", "sell": "🔻 SELL CONFIRMED ▼"}
     notes = {
@@ -279,7 +288,7 @@ def build_alert(tcfg: dict, sig_type: str, row: pd.Series) -> str:
     
     return (
         f"<b>{icons.get(sig_type)}</b>\n"
-        f"Symbol : {symbol}  |  TF : 5m\n"
+        f"Symbol : {symbol}  |  TF : {tf_display}\n"
         f"Time   : {ts_str}\n"
         f"Close  : {lb}{px:.2f}  |  RSI : {rsi:.2f}\n"
         f"{notes.get(sig_type)}"
@@ -291,12 +300,17 @@ def build_alert(tcfg: dict, sig_type: str, row: pd.Series) -> str:
 
 def main():
     log.info("═" * 60)
-    log.info("  Unified Multi-RSI Divergence Bot (Delta + Angel One)")
+    log.info("  Unified Multi-RSI Divergence Bot (Multi-Timeframe)")
     log.info("═" * 60)
 
-    # State tracking
-    trackers = {t["symbol"]: TriggerTracker() for t in TARGETS}
-    last_bars = {t["symbol"]: None for t in TARGETS}
+    # State tracking keyed by (Symbol, Interval)
+    trackers = {}
+    last_bars = {}
+    
+    for t in TARGETS:
+        key = f"{t['symbol']}_{t['interval']}"
+        trackers[key] = TriggerTracker()
+        last_bars[key] = None
     
     # Session handling for Angel One
     aone_session = None
@@ -319,6 +333,8 @@ def main():
         for tcfg in TARGETS:
             sym = tcfg["symbol"]
             exch = tcfg["exchange"]
+            interval = tcfg["interval"]
+            key = f"{sym}_{interval}"
             
             # 1. Market Hours Check
             if tcfg["gated"] and not is_market_open():
@@ -326,9 +342,9 @@ def main():
                 
             # 2. Fetch
             if exch == "Delta":
-                df = fetch_delta_candles(sym, tcfg["interval"], CANDLES_FETCH)
+                df = fetch_delta_candles(sym, interval, CANDLES_FETCH)
             elif exch == "AngelOne" and aone_session:
-                df = fetch_angel_candles(aone_session, tcfg["token"], tcfg["interval"], CANDLES_FETCH)
+                df = fetch_angel_candles(aone_session, tcfg["token"], interval, CANDLES_FETCH)
             else:
                 continue
 
@@ -340,23 +356,24 @@ def main():
             df = compute_divergences(df, LOOKBACK)
             latest = df.iloc[-1]
             
-            if latest["time"] == last_bars[sym]:
+            if latest["time"] == last_bars[key]:
                 continue
             
-            last_bars[sym] = latest["time"]
+            last_bars[key] = latest["time"]
             ts_ist = datetime.fromtimestamp(latest["time"], tz=timezone.utc) + timedelta(hours=5, minutes=30)
-            log.info(f"[{sym}] bar {ts_ist.strftime('%H:%M')} px={latest['close']:.2f} rsi={latest['rsi']:.2f}")
+            tf_disp = tcfg.get("display_tf", interval)
+            log.info(f"[{sym} @ {tf_disp}] bar {ts_ist.strftime('%H:%M')} px={latest['close']:.2f} rsi={latest['rsi']:.2f}")
 
             # 4. Signals
-            sigs = trackers[sym].update(latest)
+            sigs = trackers[key].update(latest)
             for s_type, fired in sigs.items():
                 if fired:
                     msg = build_alert(tcfg, s_type, latest)
-                    log.info(f"[{sym}] SIGNAL: {s_type.upper()}")
+                    log.info(f"[{sym} @ {tf_disp}] SIGNAL: {s_type.upper()}")
                     send_telegram(msg)
 
-        # Wait 30s-60s per loop cycle
-        time.sleep(max(30, 60 - (time.time() - cycle_start)))
+        # Wait ~60s per loop cycle
+        time.sleep(max(10, 60 - (time.time() - cycle_start)))
 
 if __name__ == "__main__":
     try:
