@@ -143,8 +143,7 @@ def fetch_delta_candles(symbol: str, resolution: str, count: int) -> pd.DataFram
         df["time"] = pd.to_numeric(df["time"], errors="coerce")
         df.sort_values("time", inplace=True)
         
-        # Drop the live candle (last row) to ensure we only look at closed bars
-        if len(df) > 1: df = df.iloc[:-1].copy()
+        # No longer dropping the live/last candle to reduce latency
         return df.tail(count).reset_index(drop=True)
     except Exception as exc:
         log.error(f"Delta fetch error ({symbol} @ {resolution}): {exc}")
@@ -183,8 +182,7 @@ def fetch_angel_candles(smart_api, token: str, interval: str, count: int) -> pd.
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df.sort_values("time", inplace=True)
         
-        # Drop current open candle
-        if len(df) > 1: df = df.iloc[:-1].copy()
+        # No longer dropping the live/last candle to reduce latency
         return df.tail(count).reset_index(drop=True)
     except Exception as exc:
         log.error(f"AngelOne fetch exception ({interval}): {exc}")
@@ -219,39 +217,44 @@ def compute_divergences(df: pd.DataFrame, lookback: int = 7) -> pd.DataFrame:
 
         hb0, lb0 = (rsi_val == window_rsi.max()), (rsi_val == window_rsi.min())
 
-        # Update Highs
-        if hb0: max_rsi_arr[i], max_close_arr[i] = rsi_val, close_val
-        elif i > 0 and not math.isnan(max_rsi_arr[i-1]):
+        # 1. Update Peak Arrays (Equivalent to max_rsi := hb == 0 ? rsi : max_rsi[1])
+        if hb0:
+            max_rsi_arr[i], max_close_arr[i] = rsi_val, close_val
+        elif i > 0:
             max_rsi_arr[i], max_close_arr[i] = max_rsi_arr[i-1], max_close_arr[i-1]
-        else: max_rsi_arr[i], max_close_arr[i] = rsi_val, close_val
-        if close_val > max_close_arr[i]: max_close_arr[i] = close_val
-        if rsi_val > max_rsi_arr[i]: max_rsi_arr[i] = rsi_val
+        else:
+            max_rsi_arr[i], max_close_arr[i] = rsi_val, close_val
 
-        # Update Lows
-        if lb0: min_rsi_arr[i], min_close_arr[i] = rsi_val, close_val
-        elif i > 0 and not math.isnan(min_rsi_arr[i-1]):
+        if lb0:
+            min_rsi_arr[i], min_close_arr[i] = rsi_val, close_val
+        elif i > 0:
             min_rsi_arr[i], min_close_arr[i] = min_rsi_arr[i-1], min_close_arr[i-1]
-        else: min_rsi_arr[i], min_close_arr[i] = rsi_val, close_val
-        if close_val < min_close_arr[i]: min_close_arr[i] = close_val
-        if rsi_val < min_rsi_arr[i]: min_rsi_arr[i] = rsi_val
+        else:
+            min_rsi_arr[i], min_close_arr[i] = rsi_val, close_val
 
-        # Divergence check (at least 2 bars)
+        # 2. Check Signals (using peak values from current bar i, but history from i-1/i-2)
         if i >= 2:
-            mc1, mc2, rsi1, maxr = max_close_arr[i-1], max_close_arr[i-2], df["rsi"].iloc[i-1], max_rsi_arr[i]
+            # Bearish: max_close[1] > max_close[2] and rsi[1] < max_rsi and rsi <= rsi[1]
+            mc1, mc2 = max_close_arr[i-1], max_close_arr[i-2]
+            rsi1, maxr = df["rsi"].iloc[i-1], max_rsi_arr[i]
             if not any(math.isnan(v) for v in [mc1, mc2, rsi1, maxr]):
-                # Bearish Divergence: Price higher high, but RSI lower high
-                # "Strong" condition: either current point or previous point > 65
                 if mc1 > mc2 and rsi1 < maxr and rsi_val <= rsi1:
-                    if rsi1 > 65 or maxr > 65:
+                    if rsi1 > 65 or maxr > 65: # "Strong" filter
                         divbear[i] = True
             
-            minc1, minc2, mr1 = min_close_arr[i-1], min_close_arr[i-2], min_rsi_arr[i]
-            if not any(math.isnan(v) for v in [minc1, minc2, mr1]):
-                # Bullish Divergence: Price lower low, but RSI higher low
-                # "Strong" condition: either current point or previous point < 38
-                if minc1 < minc2 and rsi1 > mr1 and rsi_val >= rsi1:
-                    if rsi1 < 38 or mr1 < 38:
+            # Bullish: min_close[1] < min_close[2] and rsi[1] > min_rsi and rsi >= rsi[1]
+            minc1, minc2 = min_close_arr[i-1], min_close_arr[i-2]
+            minr = min_rsi_arr[i] # Current min_rsi value
+            if not any(math.isnan(v) for v in [minc1, minc2, rsi1, minr]):
+                if minc1 < minc2 and rsi1 > minr and rsi_val >= rsi1:
+                    if rsi1 < 38 or minr < 38: # "Strong" filter
                         divbull[i] = True
+
+        # 3. Final Correction (Equivalent to "if close > max_close: max_close := close")
+        if close_val > max_close_arr[i]: max_close_arr[i] = close_val
+        if rsi_val > max_rsi_arr[i]: max_rsi_arr[i] = rsi_val
+        if close_val < min_close_arr[i]: min_close_arr[i] = close_val
+        if rsi_val < min_rsi_arr[i]: min_rsi_arr[i] = rsi_val
 
     df["divbear_close"], df["divbull_close"] = divbear, divbull
     return df
